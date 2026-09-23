@@ -1,0 +1,41 @@
+diff --git a/deps/v8/src/handles/handles.h b/deps/v8/src/handles/handles.h
+index 2d82a695..cfbb48ed 100644
+--- a/deps/v8/src/handles/handles.h
++++ b/deps/v8/src/handles/handles.h
+@@ -136,18 +136,31 @@ class Handle final : public HandleBase {
+     if constexpr (is_subtype_v<T, HeapObject>) {
+       return **this;
+     } else {
+-      // `static_assert(false)` in this else clause was an unconditional error
+-      // before CWG2518. See https://reviews.llvm.org/D144285
+-#if defined(__clang__) && __clang_major__ >= 17
++      // VIVACE PATCH: the upstream `static_assert(false)` here relies on
++      // CWG2518 (a literal `false` inside a discarded `if constexpr` branch
++      // being valid, not an unconditional hard error) and gates itself on
++      // `__clang_major__ >= 17` as a proxy for "the compiler implements that
++      // defect-report fix". Android NDK r26's bundled clang (17.0.2, AOSP
++      // build "based on r487747e") self-reports as major version 17 but does
++      // NOT actually have that fix -- confirmed directly with a minimal,
++      // standalone reproduction of the exact same construct against this same
++      // toolchain binary, which hard-errors identically. Rather than another
++      // version-number guard that could just as easily be wrong for some
++      // OTHER clang build, use the standard, version-independent portable
++      // idiom instead: make the assert's condition SYNTACTICALLY dependent on
++      // T (sizeof(T) == 0 can never be true, but unlike a bare `false` it is
++      // only ever diagnosed once this specific member function is actually
++      // instantiated for a non-heap-object T) -- this behaves correctly on
++      // every compiler, whether or not it implements CWG2518, so the whole
++      // #if/#endif guard is removed rather than adjusted.
+       // For non-HeapObjects, there's no on-heap object to dereference, so
+       // disallow using operator->.
+       //
+       // If you got an error here and want to access the Tagged<T>, use
+       // operator* -- e.g. for `Tagged<Smi>::value()`, use `(*handle).value()`.
+       static_assert(
+-          false,
++          sizeof(T) == 0,
+           "This handle does not reference a heap object. Use `(*handle).foo`.");
+-#endif
+     }
+   }
+ 

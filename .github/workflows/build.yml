@@ -1,0 +1,200 @@
+name: Build nodejs-mobile for Android
+
+on:
+  workflow_dispatch:
+    inputs:
+      nodejs_mobile_ref:
+        description: >-
+          git ref (branch or commit SHA) of nodejs-mobile/nodejs-mobile to
+          build. Defaults to the commit this repo's own patch was verified
+          against (branch update22-9-0, Node.js v22.9.0) -- that branch is
+          an upstream work-in-progress with no CI of its own and no real
+          release tag, so a commit SHA is pinned here for reproducibility
+          rather than trusting the branch not to move.
+        required: true
+        default: "106c51f95d55d1010de56a2ffd09bfb4ba819a47"
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  build:
+    name: Build ${{ matrix.abi }}
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        # tools/android_build.sh's OWN understood arch names (arm/arm64/
+        # x86_64 -- NOT the Gradle-style ABI name, though the script itself
+        # renames its output directory to the ABI name at the end, per its
+        # own TARGET_ARCH_FOLDER logic). armeabi-v7a (32-bit) is skipped --
+        # same reasoning as this project's own cpython-android-prebuilt
+        # sibling repo: real devices have been 64-bit-only for new app
+        # submissions for a while now, and Vivace (this repo's first
+        # consumer) only ever needs arm64-v8a; x86_64 is kept for emulators.
+        include:
+          - script_arch: arm64
+            abi: arm64-v8a
+          - script_arch: x86_64
+            abi: x86_64
+    env:
+      NODEJS_MOBILE_REF: ${{ github.event.inputs.nodejs_mobile_ref || '106c51f95d55d1010de56a2ffd09bfb4ba819a47' }}
+      # Matches this repo's own patch/README: the exact NDK point release
+      # this was built and verified against. r26's bundled Clang (17.0.2)
+      # self-reports as major version 17 but does NOT actually implement
+      # CWG2518 (see patches/v8-handles-cwg2518-workaround.patch) -- V8's
+      # own upstream source gates a static_assert on exactly that version
+      # check, so this is the one thing in this whole pipeline that isn't
+      # safe to casually bump without re-verifying the patch is still
+      # needed (or finding it's no longer sufficient) against whatever NDK
+      # version replaces this.
+      ANDROID_NDK_VERSION: r26d
+      ANDROID_TARGET_SDK_VERSION: "24"
+    steps:
+      - uses: actions/checkout@v4
+
+      # Ubuntu 24.04's own default python3 is 3.12 -- nodejs-mobile's
+      # android-configure wrapper (a real, un-worked-around upstream
+      # limitation, not something this repo's own patch touches) only
+      # accepts 3.8-3.11 and refuses to run under anything newer. Confirmed
+      # directly: neither python3.10 nor python3.11 has an apt candidate on
+      # bare 24.04 ("noble"), so a real Python is fetched from the
+      # deadsnakes PPA instead of trying to shoehorn 3.12 through.
+      - name: Install Python 3.10 (for android-configure; 3.12 is rejected)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq software-properties-common
+          sudo add-apt-repository -y ppa:deadsnakes/ppa
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq python3.10 python3.10-distutils
+
+      # gcc-multilib/g++-multilib: matches nodejs-mobile's own official CI
+      # recipe (.github/workflows/build-mobile.yml on this exact branch) --
+      # needed by some of V8's own host-side (build-machine-targeted, not
+      # Android-targeted) code-generation helper tools. rsync: needed by
+      # tools/copy_libnode_headers.sh, NOT preinstalled on a bare
+      # ubuntu-24.04 image (a real gap found and fixed while first bringing
+      # this build up locally -- the header-copy script silently died
+      # partway through on "rsync: command not found" otherwise, leaving
+      # node.h/v8-*.h/uv.h etc. all missing from the packaged output).
+      - name: Install build dependencies
+        run: |
+          sudo apt-get install -y -qq gcc-multilib g++-multilib rsync
+
+      - name: Download Android NDK (${{ env.ANDROID_NDK_VERSION }}, Linux)
+        run: |
+          curl -fsSL -o /tmp/ndk.zip "https://dl.google.com/android/repository/android-ndk-${ANDROID_NDK_VERSION}-linux.zip"
+          sudo mkdir -p /opt
+          sudo unzip -q /tmp/ndk.zip -d /opt
+          echo "ANDROID_NDK_ROOT=/opt/android-ndk-${ANDROID_NDK_VERSION}" >> "$GITHUB_ENV"
+
+      - name: Check out nodejs-mobile
+        run: git clone https://github.com/nodejs-mobile/nodejs-mobile.git nodejs-mobile
+
+      - name: Pin to the requested ref
+        working-directory: nodejs-mobile
+        run: git checkout "$NODEJS_MOBILE_REF"
+
+      # See the patch file's own header comment for the full root-cause
+      # story: a minimal, standalone reproduction of this exact
+      # if-constexpr+static_assert(false) construct against this same NDK's
+      # bundled clang confirmed it hard-errors identically outside of V8
+      # entirely, before this fix was written -- not guessed from the error
+      # text alone.
+      - name: Apply the V8 handles.h CWG2518 workaround
+        working-directory: nodejs-mobile
+        run: git apply --verbose ../patches/v8-handles-cwg2518-workaround.patch
+
+      # Usage: android_build.sh <ndk_path> <sdk_version> <target_arch> --
+      # builds exactly one arch when a third argument is given (omitting it
+      # would build arm+arm64+x86_64 all in one invocation, which this
+      # workflow deliberately splits across matrix legs instead, matching
+      # how the sibling cpython-android-prebuilt repo splits its own
+      # per-target builds across matrix jobs rather than one long serial
+      # job).
+      - name: Build libnode.so for ${{ matrix.abi }}
+        working-directory: nodejs-mobile
+        run: ./tools/android_build.sh "$ANDROID_NDK_ROOT" "$ANDROID_TARGET_SDK_VERSION" ${{ matrix.script_arch }}
+
+      # Deliberately run per matrix leg (once per arch), even though the
+      # header set itself is arch-independent -- each matrix job is an
+      # isolated VM with its own clone, so there is no cross-job artifact
+      # to share this from without adding a second, sequential job stage
+      # for no real benefit (the extra ~1s this costs per leg is cheaper
+      # than that complexity).
+      - name: Copy libnode headers
+        working-directory: nodejs-mobile
+        run: bash tools/copy_libnode_headers.sh android
+
+      # Matches this repo's own README's documented package layout:
+      #   libnode.so
+      #   include/node/...   (node.h, v8-*.h, uv.h, openssl/, etc.)
+      - name: Package ${{ matrix.abi }}
+        id: pkg
+        working-directory: nodejs-mobile
+        run: |
+          STAGE="nodejs-mobile-${{ matrix.abi }}"
+          mkdir -p "$STAGE/include"
+          cp "out_android/${{ matrix.abi }}/libnode.so" "$STAGE/"
+          cp -r out_android/libnode/include/node "$STAGE/include/node"
+          NAME="nodejs-mobile-v22.9.0-${{ matrix.abi }}.tar.gz"
+          tar -czf "$NAME" "$STAGE"
+          echo "path=$(pwd)/$NAME" >> "$GITHUB_OUTPUT"
+          echo "name=$NAME" >> "$GITHUB_OUTPUT"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.pkg.outputs.name }}
+          path: ${{ steps.pkg.outputs.path }}
+
+  release:
+    name: Publish release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-24.04
+    # GitHub defaults new repos' auto-issued GITHUB_TOKEN to read-only
+    # permissions -- softprops/action-gh-release needs contents: write to
+    # create the release (matches the sibling cpython-android-prebuilt
+    # repo's own workflow, which hit and documented this exact requirement
+    # first).
+    permissions:
+      contents: write
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/**/*.tar.gz
+          name: "nodejs-mobile v22.9.0 for Android"
+          body: |
+            Prebuilt `libnode.so` + headers for Android, built from
+            nodejs-mobile's own official `update22-9-0` branch (Node.js
+            v22.9.0), with one small source patch applied (see
+            `patches/v8-handles-cwg2518-workaround.patch`) to work around a
+            real Android NDK r26 Clang compatibility gap -- see this repo's
+            README for the full story and the package layout.
+
+            - **Node.js version:** v22.9.0
+            - **Targets:** `arm64-v8a` (real devices), `x86_64` (emulators)
+            - **NDK version used to build:** r26d (pinned; see the patch
+              file's own comment for why this specific version matters more
+              than usual here)
+            - **License:** the packaged `libnode.so`/headers are Node.js/V8
+              themselves (with one small patch to a single V8 header --
+              see LICENSE), under their own upstream licenses. This repo's
+              own build scripts/workflow are MIT-licensed.
+
+            First (and so far only) consumer:
+            [Vivace](https://github.com/Sportacandy/vivace) (YouTube
+            Download & play mode on Android -- yt-dlp's own
+            `--js-runtimes` mechanism needs a real `node`-compatible
+            executable to solve YouTube's signature/PO-token challenges,
+            and Android can't execute a downloaded native binary, so this
+            gets wrapped into a legally-exec()-able bundled library instead
+            -- see Vivace's own `src/android/vivace_node_main.cc`).
+          generate_release_notes: true
