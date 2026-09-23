@@ -11,8 +11,8 @@ nodejs-mobile's own official releases only go up to v18.20.4 -- the
 Node.js v22, but it's an unfinished work-in-progress with no CI run of its
 own on the official repo (its own `.github/workflows/build-mobile.yml`
 only triggers on pushes/PRs into `main`, which this branch is neither) and
-no published release. This repo builds it anyway, applies one small,
-necessary patch (see below), and publishes the result.
+no published release. This repo builds it anyway, applies two small,
+necessary patches (see below), and publishes the result.
 
 ## Why this exists
 
@@ -27,9 +27,11 @@ nodejs-mobile's official v18.20.4 release can't satisfy at all. This repo
 exists to build a real v22 so that floor is met honestly, instead of
 patching yt-dlp's own version check down to accept an older runtime.
 
-## The patch
+## The patches
 
-`patches/v8-handles-cwg2518-workaround.patch` touches exactly one file,
+### `patches/v8-handles-cwg2518-workaround.patch`
+
+Touches exactly one file,
 `deps/v8/src/handles/handles.h`. Upstream V8 source there has:
 
 ```cpp
@@ -54,10 +56,26 @@ template parameter, so it's only ever diagnosed once the branch is actually
 taken for a real type, regardless of whether the compiler implements
 CWG2518) -- and removes the now-unnecessary version guard entirely.
 
-This is the **only** source modification anywhere in this pipeline. Every
-build dependency issue (Python version, `rsync`, `gcc-multilib`) is a build
-*environment* gap, not something requiring changes to nodejs-mobile's own
-source.
+Every build dependency issue (Python version, `rsync`, `gcc-multilib`) is a
+build *environment* gap, not something requiring a source change.
+
+### `patches/android-build-parallel-cap.patch`
+
+Touches `tools/android_build.sh`'s one `make -j $(getconf
+_NPROCESSORS_ONLN)` line, capping it to `-j2`. Found on this repo's own
+first real CI run: the `arm64-v8a` matrix leg was silently killed mid-build
+-- no compiler error, no exit-code annotation anywhere in the job log --
+while `x86_64` happened to succeed in the very same run. That's the
+signature of the runner's own OOM killer, not a real source bug: a
+standard GitHub-hosted runner's 4 detected cores (what `getconf
+_NPROCESSORS_ONLN` reports) don't come with enough memory headroom for V8's
+own famously memory-hungry per-translation-unit compiles at that
+parallelism. `-j2` trades some wall-clock time for a much lower peak-memory
+ceiling -- the same tradeoff this repo's first consumer, Vivace, already
+made for an analogous from-source V8 build on a similarly memory-
+constrained CI runner.
+
+These two are the **only** source modifications anywhere in this pipeline.
 
 ## What gets built
 

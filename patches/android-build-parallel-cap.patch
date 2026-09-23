@@ -1,0 +1,21 @@
+diff --git a/tools/android_build.sh b/tools/android_build.sh
+index 179846ac..fdb4f542 100755
+--- a/tools/android_build.sh
++++ b/tools/android_build.sh
+@@ -29,7 +29,15 @@ BUILD_ARCH() {
+ 
+   # Compile
+   eval '"./android-configure" "$ANDROID_NDK_PATH" $ANDROID_SDK_VERSION $TARGET_ARCH'
+-  make -j $(getconf _NPROCESSORS_ONLN)
++  # Capped from the upstream default (getconf _NPROCESSORS_ONLN, i.e. one
++  # job per detected core) -- confirmed via a real CI run that a standard
++  # GitHub-hosted runner's 4 cores / 16GB RAM is not enough headroom for
++  # V8's own memory-hungry per-translation-unit compiles at that
++  # parallelism: the job was silently killed mid-build with no compiler
++  # error and no exit-code annotation anywhere in the log (the same
++  # silent-OOM-kill signature this pipeline's sibling projects have hit
++  # before under similar constraints) -- not a real source-level bug.
++  make -j2
+ 
+   # Move binaries
+   TARGET_ARCH_FOLDER="$TARGET_ARCH"

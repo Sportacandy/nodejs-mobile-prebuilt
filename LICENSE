@@ -28,7 +28,9 @@ these scripts, and the resulting published binary/header artifacts, remain
 licensed under their own upstream licenses (Node.js: MIT-style, see
 https://github.com/nodejs/node/blob/main/LICENSE; V8: BSD-style, see
 https://github.com/nodejs/node/blob/main/deps/v8/LICENSE) -- this repository
-does not relicense them. The one small source patch this repo carries
-(patches/v8-handles-cwg2518-workaround.patch) is a derivative of that same
-upstream V8 source and is distributed under the same BSD-style license as
-the file it modifies.
+does not relicense them. The two small source patches this repo carries
+(patches/v8-handles-cwg2518-workaround.patch,
+patches/android-build-parallel-cap.patch) are each a derivative of the
+upstream nodejs-mobile/V8 file they modify and are distributed under that
+same file's own upstream license (BSD-style for the V8 header, MIT-style
+for the build script).

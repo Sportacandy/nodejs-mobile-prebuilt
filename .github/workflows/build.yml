@@ -105,6 +105,20 @@ jobs:
         working-directory: nodejs-mobile
         run: git apply --verbose ../patches/v8-handles-cwg2518-workaround.patch
 
+      # Real failure hit on the first CI run of this workflow: the
+      # arm64-v8a leg was silently killed mid-build (no compiler error, no
+      # exit-code annotation anywhere in the job log) while x86_64
+      # happened to succeed in the same run -- the signature of the
+      # runner's own OOM killer, not a real source bug. android_build.sh's
+      # own upstream `make -j $(getconf _NPROCESSORS_ONLN)` trusts the
+      # runner's reported core count (4 on a standard GitHub-hosted
+      # runner) with no regard to available memory; V8 compiles are
+      # notoriously memory-hungry per translation unit. See the patch
+      # file's own header comment for the same reasoning.
+      - name: Apply the build parallelism cap (avoids OOM on standard runners)
+        working-directory: nodejs-mobile
+        run: git apply --verbose ../patches/android-build-parallel-cap.patch
+
       # Usage: android_build.sh <ndk_path> <sdk_version> <target_arch> --
       # builds exactly one arch when a third argument is given (omitting it
       # would build arm+arm64+x86_64 all in one invocation, which this
@@ -174,9 +188,10 @@ jobs:
           body: |
             Prebuilt `libnode.so` + headers for Android, built from
             nodejs-mobile's own official `update22-9-0` branch (Node.js
-            v22.9.0), with one small source patch applied (see
-            `patches/v8-handles-cwg2518-workaround.patch`) to work around a
-            real Android NDK r26 Clang compatibility gap -- see this repo's
+            v22.9.0), with two small source patches applied (see
+            `patches/`) -- one working around a real Android NDK r26
+            Clang compatibility gap, one capping build parallelism to
+            avoid an OOM kill on standard CI runners -- see this repo's
             README for the full story and the package layout.
 
             - **Node.js version:** v22.9.0
@@ -185,8 +200,8 @@ jobs:
               file's own comment for why this specific version matters more
               than usual here)
             - **License:** the packaged `libnode.so`/headers are Node.js/V8
-              themselves (with one small patch to a single V8 header --
-              see LICENSE), under their own upstream licenses. This repo's
+              themselves (with the two small patches noted above -- see
+              LICENSE), under their own upstream licenses. This repo's
               own build scripts/workflow are MIT-licensed.
 
             First (and so far only) consumer:
